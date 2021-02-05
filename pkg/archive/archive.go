@@ -230,18 +230,60 @@ func DecompressStream(archive io.Reader) (io.ReadCloser, error) {
 	}
 }
 
+func gzCompress(ctx context.Context, buf io.Reader) (io.ReadCloser, error) {
+	noPigzEnv := os.Getenv("MOBY_DISABLE_PIGZ")
+	var noPigz bool
+
+	if noPigzEnv != "" {
+		var err error
+		noPigz, err = strconv.ParseBool(noPigzEnv)
+		if err != nil {
+			logrus.WithError(err).Warn("invalid value in MOBY_DISABLE_PIGZ env var")
+		}
+	}
+
+	if noPigz {
+		logrus.Debugf("Use of pigz is disabled due to MOBY_DISABLE_PIGZ=%s", noPigzEnv)
+		return gzip.NewWriter(buf)
+	}
+
+	pigzPath, err := exec.LookPath("pigz")
+	if err != nil {
+		logrus.Debugf("pigz binary not found, falling back to go gzip library")
+		return gzip.NewWriter(buf)
+	}
+
+	logrus.Debugf("Using %s to compress", pigzPath)
+
+	return cmdStream(exec.CommandContext(ctx, pigzPath, "-c"), buf)
+}
+
+func wrapWriteCloser(writeBuf io.WriteCloser, cancel context.CancelFunc) io.WriteCloser {
+	return ioutils.NewWriteCloserWrapper(writeBuf, func() error {
+		cancel()
+		return writeBuf.Close()
+	})
+}
+
 // CompressStream compresses the dest with specified compression algorithm.
 func CompressStream(dest io.Writer, compression Compression) (io.WriteCloser, error) {
 	p := pools.BufioWriter32KPool
 	buf := p.Get(dest)
+
 	switch compression {
 	case Uncompressed:
 		writeBufWrapper := p.NewWriteCloserWrapper(buf, buf)
 		return writeBufWrapper, nil
 	case Gzip:
-		gzWriter := gzip.NewWriter(dest)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		gzWriter, err := gzCompress(ctx, buf)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 		writeBufWrapper := p.NewWriteCloserWrapper(buf, gzWriter)
-		return writeBufWrapper, nil
+		return wrapWriteCloser(writeBufWrapper, cancel), nil
 	case Bzip2, Xz:
 		// archive/bzip2 does not support writing, and there is no xz support at all
 		// However, this is not a problem as docker only currently generates gzipped tars

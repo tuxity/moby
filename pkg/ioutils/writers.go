@@ -26,18 +26,21 @@ type NopFlusher struct{}
 // Flush is a nop operation.
 func (f *NopFlusher) Flush() {}
 
-type writeCloserWrapper struct {
+// WriteCloserWrapper wraps an io.Writer, and implements an io.WriteCloser
+// It calls the given callback function when closed. It should be constructed
+// with NewWriteCloserWrapper
+type WriteCloserWrapper struct {
 	io.Writer
 	closer func() error
 }
 
-func (r *writeCloserWrapper) Close() error {
+func (r *WriteCloserWrapper) Close() error {
 	return r.closer()
 }
 
 // NewWriteCloserWrapper returns a new io.WriteCloser.
 func NewWriteCloserWrapper(r io.Writer, closer func() error) io.WriteCloser {
-	return &writeCloserWrapper{
+	return &WriteCloserWrapper{
 		Writer: r,
 		closer: closer,
 	}
